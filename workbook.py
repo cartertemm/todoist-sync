@@ -57,6 +57,7 @@ def is_open(path):
 def load_rows(path, owner):
 	sheet = load_workbook(path)[TASKS_SHEET]
 	columns = _columns(sheet)
+	_check_merges(sheet)
 	known = set(columns.values())
 	rows = []
 	for cells in sheet.iter_rows(min_row=FIRST_DATA_ROW):
@@ -133,6 +134,12 @@ def _check_link(cells, columns, task_id):
 			"The rows were probably sorted or filtered without the hidden ID column. "
 			"Undo that, or restore a copy from the backups folder."
 		)
+
+
+def _check_merges(sheet):
+	for merged in sheet.merged_cells.ranges:
+		if merged.max_row >= FIRST_DATA_ROW:
+			raise WorkbookError(f"Cells {merged.coord} are merged. Unmerge them so the script can write the rows.")
 
 
 def _clear_data(sheet):

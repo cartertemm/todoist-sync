@@ -200,6 +200,25 @@ def test_text_starting_with_equals_is_not_a_formula(path):
 	assert load_rows(path, OWNER)[0].record.content == '=HYPERLINK("http://x")'
 
 
+def test_merged_data_cells_raise(path):
+	save_rows(path, sample_rows(), PROJECTS, OWNER)
+	book = load_workbook(path)
+	book["Tasks"].merge_cells("H2:H3")
+	book.save(path)
+	with pytest.raises(WorkbookError, match="H2:H3"):
+		load_rows(path, OWNER)
+
+
+def test_merged_header_cells_are_allowed(path):
+	save_rows(path, sample_rows(), PROJECTS, OWNER)
+	book = load_workbook(path)
+	book["Tasks"]["M1"] = "My notes"
+	book["Tasks"].merge_cells("M1:N1")
+	book.save(path)
+	save_rows(path, load_rows(path, OWNER), PROJECTS, OWNER)
+	assert load_rows(path, OWNER) == sample_rows()
+
+
 def test_missing_column_raises(path):
 	book = Workbook()
 	book.active.title = "Tasks"
