@@ -18,7 +18,7 @@ pip install -r requirements.txt
 
 Copy `config.example.toml` to `config.toml` and fill it in:
 
-* `todoist_token`: your token. If you'd rather not keep it in a file, set the `TODOIST_API_TOKEN` environment variable instead. When both are set, the variable wins.
+* `todoist_token`: your token. If you'd rather not keep it in a file, set the `TODOIST_API_TOKEN` environment variable instead. When both are set, the variable wins. Task Scheduler and cron don't see variables you set in your shell. For scheduled runs, keep the token in `config.toml` or set the variable system-wide.
 * `workbook`: where the spreadsheet lives, for example `~/OneDrive/Tasks.xlsx`.
 * `owner`: your name. A task with you (or nobody) in the Who column gets no `who-` label.
 * `max_delete_percent`: see the section on `--allow-deletes` below.
@@ -65,7 +65,7 @@ When you finish a repeating task, on either side, its row stays as Todo and move
 
 Deleting a row in Excel deletes the task in Todoist, and deleting a task in Todoist removes its row. That's what you want most of the time. The danger is a sync that reads a broken file. If the script ever reads an empty sheet, an old copy, or the wrong file, every task looks deleted, and Todoist has no undo for deletes made this way.
 
-So there's a guard. If one sync would delete more than `max_delete_percent` of your tasks (25% unless you change it), it stops before it touches anything and prints the tasks it was about to delete.
+So there's a guard. If one sync would delete more than `max_delete_percent` of your tasks (25% unless you change it), it stops before it touches anything and prints the tasks it was about to delete. A scheduled run has no screen, so it only logs the count in `sync.log`. Run `python sync.py` by hand to see the list.
 
 Read that list. If you really did mean to delete them, for example because you cleared out an old project, run this once by hand:
 
