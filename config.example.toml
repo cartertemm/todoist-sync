@@ -1,0 +1,5 @@
+# Todoist > Settings > Integrations > Developer. The TODOIST_API_TOKEN environment variable overrides this.
+todoist_token = ""
+workbook = "~/OneDrive/Tasks.xlsx"
+owner = "Carter"
+max_delete_percent = 25

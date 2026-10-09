@@ -1,0 +1,8 @@
+config.toml
+state.json
+sync.log
+backups/
+.venv/
+__pycache__/
+.pytest_cache/
+docs/superpowers/
