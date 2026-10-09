@@ -125,6 +125,13 @@ def test_is_open_detects_lock_files(path):
 	assert is_open(path)
 
 
+def test_is_open_detects_lock_file_for_long_names(tmp_path):
+	long_path = tmp_path / "MyLongTaskList.xlsx"
+	save_rows(long_path, sample_rows(), PROJECTS, OWNER)
+	(tmp_path / "~$LongTaskList.xlsx").write_text("")
+	assert is_open(long_path)
+
+
 def test_backup_keeps_newest_copies(path, tmp_path):
 	save_rows(path, sample_rows(), PROJECTS, OWNER)
 	backup_dir = tmp_path / "backups"

@@ -36,7 +36,8 @@ class WorkbookError(Exception):
 
 def is_open(path):
 	path = Path(path)
-	if (path.parent / f"~${path.name}").exists() or (path.parent / f".~lock.{path.name}#").exists():
+	lock_names = ("~$" + path.name, "~$" + path.name[2:], f".~lock.{path.name}#")
+	if any((path.parent / name).exists() for name in lock_names):
 		return True
 	if not path.exists():
 		return False
