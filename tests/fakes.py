@@ -18,6 +18,7 @@ class FakeTodoist:
 		self.deleted = []
 		self.calls = []
 		self.fail_on = None
+		self.fail_status = None
 		self.next_id = 1
 
 	def add(self, content, project_id="p-work", **extra):
@@ -96,6 +97,10 @@ class FakeTodoist:
 
 	def _call(self, name, *args):
 		self.calls.append((name, *args))
+		if self.fail_on == name and self.fail_status:
+			response = requests.Response()
+			response.status_code = self.fail_status
+			raise requests.HTTPError(f"{self.fail_status} {name} failed", response=response)
 		if self.fail_on == name:
 			raise requests.RequestException(f"{name} failed")
 

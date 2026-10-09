@@ -10,7 +10,7 @@ import requests
 
 import workbook
 from mapping import DATE_LENGTH, DONE_SUFFIX, FIELDS, Record, build_description, labels_for, task_to_record, to_api_priority
-from todoist import TodoistClient
+from todoist import TodoistClient, TodoistError
 from workbook import Row
 
 DEFAULT_MAX_DELETE_PERCENT = 25
@@ -24,6 +24,9 @@ LOG_PATH = BASE_DIR / "sync.log"
 BACKUP_DIR = BASE_DIR / "backups"
 BACKUPS_KEPT = 10
 TOKEN_ENV = "TODOIST_API_TOKEN"
+CLIENT_ERRORS = range(400, 500)
+TOO_MANY_REQUESTS = 429
+TRACE_INDENT = "\t"
 
 
 class DeleteGuardError(Exception):
@@ -70,6 +73,15 @@ def due_payload(record, task, repeat_changed):
 	return payload
 
 
+def http_status(error):
+	return getattr(error.response, "status_code", None) if isinstance(error, requests.HTTPError) else None
+
+
+def is_row_error(error):
+	status = http_status(error)
+	return isinstance(error, TodoistError) or (status in CLIENT_ERRORS and status != TOO_MANY_REQUESTS)
+
+
 def run_sync(rows, client, state, owner, now, max_delete_percent=DEFAULT_MAX_DELETE_PERCENT, allow_deletes=False):
 	return SyncRun(client, owner, now).run(rows, state, max_delete_percent, allow_deletes)
 
@@ -86,14 +98,17 @@ class SyncRun:
 		projects = self.client.projects()
 		self.project_names = {project["id"]: project["name"] for project in projects}
 		self.project_ids = {project["name"]: project["id"] for project in projects}
-		self.inbox_id = next(project["id"] for project in projects if project.get("inbox_project"))
+		self.inbox_id = next((project["id"] for project in projects if project.get("inbox_project")), None)
 		self.open_tasks = {task["id"]: task for task in self.client.open_tasks()}
 		snapshot = {task_id: Record(**data) for task_id, data in state.get("tasks", {}).items()}
+		rows = self._split_copies(rows)
 		row_ids = {row.id for row in rows if row.id}
+		self.taken = row_ids | snapshot.keys()
+		self.completed_ids = self._completed_ids(state.get("last_sync"))
 		fetched = self._fetch_missing(snapshot, row_ids)
 		self._check_deletes(snapshot, row_ids, fetched, max_delete_percent, allow_deletes)
 		old_handled = state.get("handled_completions", [])
-		completions = self._recurring_completions(state.get("last_sync")) - set(old_handled)
+		completions = self._recurring_completions() - set(old_handled)
 		new_rows = []
 		new_state = {}
 		error = None
@@ -105,7 +120,10 @@ class SyncRun:
 					self._sync_row(row, snapshot, fetched, completions, new_rows, new_state)
 					continue
 				except requests.RequestException as exc:
-					error = exc
+					if is_row_error(exc):
+						self.log.append(f"row skipped, Todoist said {http_status(exc) or exc}: {row.record.content}")
+					else:
+						error = exc
 			if len(new_rows) == written:
 				new_rows.append(row)
 				del self.handled[mark:]
@@ -128,6 +146,18 @@ class SyncRun:
 		}
 		return Result(new_rows, new_state_data, list(self.project_names.values()), self.log, error)
 
+	def _split_copies(self, rows):
+		seen = set()
+		result = []
+		for row in rows:
+			if row.id and not row.id.endswith(DONE_SUFFIX):
+				if row.id in seen:
+					self.log.append(f"copied row becomes a new task: {row.record.content}")
+					row = replace(row, id=None)
+				seen.add(row.id)
+			result.append(row)
+		return result
+
 	def _fetch_missing(self, snapshot, row_ids):
 		fetched = {}
 		for task_id in row_ids - self.open_tasks.keys():
@@ -139,30 +169,50 @@ class SyncRun:
 
 	def _check_deletes(self, snapshot, row_ids, fetched, max_delete_percent, allow_deletes):
 		names = [snapshot[task_id].content for task_id in snapshot if task_id not in row_ids and task_id in self.open_tasks]
-		names += [snapshot[task_id].content for task_id in snapshot if task_id in fetched and fetched[task_id] is None]
+		names += [
+			snapshot[task_id].content for task_id in snapshot
+			if task_id in fetched and fetched[task_id] is None and task_id not in self.completed_ids
+		]
 		if names and not allow_deletes and len(names) * PERCENT > max_delete_percent * len(snapshot):
 			raise DeleteGuardError(names)
 
-	def _recurring_completions(self, last_sync):
+	def _completed_ids(self, last_sync):
 		if not last_sync:
 			return set()
 		oldest = self.now - datetime.timedelta(days=COMPLETED_LOOKBACK_DAYS)
 		since = max(datetime.datetime.fromisoformat(last_sync), oldest)
 		items = self.client.completed_since(since.strftime(API_TIME_FORMAT), self.now.strftime(API_TIME_FORMAT))
-		ids = {item.get("task_id") or item["id"] for item in items}
-		return {task_id for task_id in ids if (self.open_tasks.get(task_id, {}).get("due") or {}).get("is_recurring")}
+		return {item.get("task_id") or item["id"] for item in items}
+
+	def _recurring_completions(self):
+		return {
+			task_id for task_id in self.completed_ids
+			if (self.open_tasks.get(task_id, {}).get("due") or {}).get("is_recurring")
+		}
 
 	def _sync_row(self, row, snapshot, fetched, completions, new_rows, new_state):
 		if row.id and row.id.endswith(DONE_SUFFIX):
 			new_rows.append(row)
 			return
 		if row.id is None:
-			self._create(row, new_rows, new_state)
-			return
+			match = self._find_match(row.record)
+			if match is None:
+				self._create(row, new_rows, new_state)
+				return
+			self.log.append(f"linked row to existing task: {row.record.content}")
+			row = replace(row, id=match)
 		base = snapshot.get(row.id)
+		if not row.record.content:
+			self.log.append(f"row skipped, the Task cell is blank: {row.id}")
+			new_rows.append(row)
+			if base is not None:
+				new_state[row.id] = base
+			return
 		task = self.open_tasks.get(row.id) or fetched.get(row.id)
 		if task is not None:
 			todoist = task_to_record(task, self.project_names, self.owner)
+		elif row.id in self.completed_ids:
+			todoist = replace(base or row.record, status="Complete")
 		elif base is not None and base.status == "Complete":
 			todoist = base
 		elif base is not None:
@@ -186,25 +236,31 @@ class SyncRun:
 		final, push = self._drop_invalid(final, push, todoist)
 		if push:
 			task = task or self.client.get_task(row.id)
-			if task is None:
+			if task is None and todoist.status != "Complete":
 				self.log.append(f"removed row: {final.content}")
 				return
+			if task is None:
+				self.log.append(f"completed task can't be read, Excel edits not sent: {final.content}")
+				final, push = todoist, {}
+		if push:
 			if push.get("status") == "Complete" and todoist.repeat:
 				history.append(self._history_row(row, replace(final, due=todoist.due)))
-			task = self._push(task, push, final)
-			if task is None:
+			pushed = self._push(task, push, final)
+			closed = push.get("status") == "Complete" and not todoist.repeat
+			if pushed is None and not closed:
 				self.log.append(f"removed row: {final.content}")
 				return
-			final = task_to_record(task, self.project_names, self.owner)
+			if pushed is not None:
+				final = task_to_record(pushed, self.project_names, self.owner)
 			self.log.append(f"updated in Todoist: {final.content}")
 		elif final != row.record:
 			self.log.append(f"updated row: {final.content}")
-		new_rows.append(Row(row.id, final, row.start_date))
+		new_rows.append(replace(row, record=final))
 		new_rows.extend(history)
 		new_state[row.id] = final
 
 	def _history_row(self, row, record):
-		return Row(row.id + DONE_SUFFIX, replace(record, status="Complete", repeat=None), row.start_date)
+		return replace(row, id=row.id + DONE_SUFFIX, record=replace(record, status="Complete", repeat=None))
 
 	def _drop_invalid(self, final, push, todoist):
 		if "project" in push and push["project"] not in self.project_ids:
@@ -242,9 +298,22 @@ class SyncRun:
 				self.client.reopen_task(task_id)
 		return self.client.get_task(task_id)
 
+	def _project_id(self, record):
+		return self.project_ids.get(record.project) if record.project else self.inbox_id
+
+	def _find_match(self, record):
+		project_id = self._project_id(record)
+		if not record.content or project_id is None:
+			return None
+		for task_id, task in self.open_tasks.items():
+			if task_id not in self.taken and task["project_id"] == project_id and task["content"].strip() == record.content:
+				self.taken.add(task_id)
+				return task_id
+		return None
+
 	def _create(self, row, new_rows, new_state):
 		record = row.record
-		project_id = self.project_ids.get(record.project) if record.project else self.inbox_id
+		project_id = self._project_id(record)
 		if not record.content or project_id is None:
 			self.log.append(f"row skipped, needs a task name and a known project: {record.content}")
 			new_rows.append(row)
@@ -263,18 +332,18 @@ class SyncRun:
 		created = self.client.create_task(**fields)
 		task_id = created["id"]
 		final = task_to_record(created, self.project_names, self.owner)
-		new_rows.append(Row(task_id, final, row.start_date))
+		new_rows.append(replace(row, id=task_id, record=final))
 		new_state[task_id] = final
 		self.log.append(f"created in Todoist: {final.content}")
 		if record.status == "Complete":
-			new_rows[-1] = Row(task_id, replace(final, status="Complete"), row.start_date)
+			new_rows[-1] = replace(new_rows[-1], record=replace(final, status="Complete"))
 			self.client.close_task(task_id)
 			new_state[task_id] = replace(final, status="Complete")
 			if (created.get("due") or {}).get("is_recurring"):
 				self.handled.append(task_id)
 			closed = self.client.get_task(task_id)
 			if closed is not None:
-				new_rows[-1] = Row(task_id, task_to_record(closed, self.project_names, self.owner), row.start_date)
+				new_rows[-1] = replace(new_rows[-1], record=task_to_record(closed, self.project_names, self.owner))
 				new_state[task_id] = new_rows[-1].record
 
 	def _finish(self, snapshot, row_ids, new_rows, new_state):
@@ -290,7 +359,7 @@ class SyncRun:
 				return error
 			self.log.append(f"deleted in Todoist: {snapshot[task_id].content}")
 		for task_id, task in self.open_tasks.items():
-			if task_id in row_ids or task_id in snapshot:
+			if task_id in self.taken:
 				continue
 			record = task_to_record(task, self.project_names, self.owner)
 			new_rows.append(Row(task_id, record))

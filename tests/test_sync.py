@@ -4,9 +4,10 @@ from dataclasses import replace
 import pytest
 import requests
 
-from fakes import FakeTodoist
+from fakes import HOME, WORK, FakeTodoist
 from mapping import Record
 from sync import DeleteGuardError, due_payload, run_sync
+from todoist import TodoistError
 from workbook import Row
 
 NOW = datetime.datetime(2026, 10, 9, 12, 0, tzinfo=datetime.timezone.utc)
@@ -413,3 +414,173 @@ def test_clean_run_saves_only_its_own_handled_completions():
 	first = sync(fake)
 	state = {**first.state, "handled_completions": ["old"]}
 	assert sync(fake, first.rows, state).state["handled_completions"] == []
+
+
+def hide_completed(fake):
+	read = fake.get_task
+	fake.get_task = lambda task_id: None if fake.tasks.get(task_id, {}).get("checked") else read(task_id)
+
+
+def test_new_row_links_to_task_with_same_name_and_project():
+	fake = FakeTodoist()
+	task_id = fake.add("Write report")
+	result = sync(fake, [Row(None, record("Write report", notes="From Excel"))])
+	assert result.rows == [Row(task_id, record("Write report"))]
+	assert not any(call[0] == "create_task" for call in fake.calls)
+	assert "linked row to existing task: Write report" in result.log
+
+
+def test_new_row_is_not_linked_to_task_in_other_project():
+	fake = FakeTodoist()
+	fake.add("Write report", project_id="p-home")
+	result = sync(fake, [Row(None, record("Write report"))])
+	assert len(fake.tasks) == 2
+	assert len(result.rows) == 2
+
+
+def test_each_task_is_linked_once():
+	fake = FakeTodoist()
+	fake.add("Write report")
+	sync(fake, [Row(None, record("Write report")), Row(None, record("Write report"))])
+	assert len(fake.tasks) == 2
+
+
+def test_synced_task_is_not_linked_again():
+	fake = FakeTodoist()
+	fake.add("Write report")
+	first = sync(fake)
+	result = sync(fake, first.rows + [Row(None, record("Write report"))], first.state)
+	assert len(fake.tasks) == 2
+	assert len({row.id for row in result.rows}) == 2
+
+
+def test_client_error_skips_row_and_continues():
+	fake = FakeTodoist()
+	fake.add("A")
+	b_id = fake.add("B")
+	first = sync(fake)
+	fake.add("C")
+	rows = edit(first, 0, content="A2")
+	rows[1] = Row(rows[1].id, replace(rows[1].record, project="Home"))
+	fake.fail_on = "update_task"
+	fake.fail_status = 400
+	result = sync(fake, rows, first.state)
+	assert result.error is None
+	assert result.rows[0] == rows[0]
+	assert result.state["tasks"][rows[0].id] == first.state["tasks"][rows[0].id]
+	assert fake.tasks[b_id]["project_id"] == "p-home"
+	assert [row.record.content for row in result.rows] == ["A2", "B", "C"]
+	assert "row skipped, Todoist said 400: A2" in result.log
+
+
+def test_rate_limit_still_stops_run():
+	fake = FakeTodoist()
+	fake.add("A")
+	first = sync(fake)
+	fake.fail_on = "update_task"
+	fake.fail_status = 429
+	result = sync(fake, edit(first, content="A2"), first.state)
+	assert result.error is not None
+
+
+def test_rejected_due_change_skips_row():
+	fake = FakeTodoist()
+	fake.add("A")
+	fake.add("B")
+	first = sync(fake)
+
+	def reject(task_id, due):
+		raise TodoistError("Could not set due date")
+
+	fake.set_due = reject
+	rows = edit(first, 0, repeat="every blursday")
+	rows[1] = Row(rows[1].id, replace(rows[1].record, content="B2"))
+	result = sync(fake, rows, first.state)
+	assert result.error is None
+	assert result.rows[0] == rows[0]
+	assert result.rows[1].record.content == "B2"
+
+
+def test_blank_task_name_with_id_is_skipped():
+	fake = FakeTodoist()
+	task_id = fake.add("Task")
+	first = sync(fake)
+	result = sync(fake, edit(first, content=""), first.state)
+	assert not any(call[0] == "update_task" for call in fake.calls)
+	assert result.rows[0].record.content == ""
+	assert result.state["tasks"][task_id] == first.state["tasks"][task_id]
+	assert any("blank" in line for line in result.log)
+
+
+def test_copied_row_becomes_new_task():
+	fake = FakeTodoist()
+	task_id = fake.add("Task")
+	first = sync(fake)
+	copy = Row(task_id, record("Task copy"))
+	result = sync(fake, first.rows + [copy], first.state)
+	assert len(fake.tasks) == 2
+	assert fake.tasks[task_id]["content"] == "Task"
+	assert result.rows[1].id not in (None, task_id)
+	assert any("copied row" in line for line in result.log)
+
+
+def test_history_rows_with_same_id_are_kept():
+	fake = FakeTodoist()
+	fake.add("Task")
+	first = sync(fake)
+	history = [Row("t1:done", record("Run 1", status="Complete")), Row("t1:done", record("Run 2", status="Complete"))]
+	result = sync(fake, first.rows + history, first.state)
+	assert result.rows[1:] == history
+	assert len(fake.tasks) == 1
+
+
+def test_completed_task_that_cannot_be_read_stays_complete():
+	fake = FakeTodoist()
+	task_id = fake.add("One-off")
+	first = sync(fake)
+	fake.tasks[task_id]["checked"] = True
+	fake.completed.append({"id": task_id})
+	hide_completed(fake)
+	result = sync(fake, first.rows, first.state)
+	assert result.rows[0].record.status == "Complete"
+	assert result.state["tasks"][task_id]["status"] == "Complete"
+	assert sync(fake, result.rows, result.state).rows == result.rows
+
+
+def test_closed_task_that_cannot_be_read_stays_complete():
+	fake = FakeTodoist()
+	task_id = fake.add("One-off")
+	first = sync(fake)
+	hide_completed(fake)
+	result = sync(fake, edit(first, status="Complete"), first.state)
+	assert fake.tasks[task_id]["checked"]
+	assert result.rows[0].id == task_id
+	assert result.rows[0].record.status == "Complete"
+	assert result.state["tasks"][task_id]["status"] == "Complete"
+
+
+def test_new_complete_row_stays_when_closed_task_cannot_be_read():
+	fake = FakeTodoist()
+	hide_completed(fake)
+	result = sync(fake, [Row(None, record("Done thing", status="Complete"))])
+	task_id = result.rows[0].id
+	assert result.rows[0].record.status == "Complete"
+	assert result.state["tasks"][task_id]["status"] == "Complete"
+
+
+def test_missing_inbox_skips_rows_without_project():
+	fake = FakeTodoist()
+	fake.project_list = [WORK, HOME]
+	row = Row(None, record("Loose end", project=""))
+	result = sync(fake, [row])
+	assert result.rows == [row]
+	assert fake.tasks == {}
+
+
+def test_extra_columns_follow_the_row():
+	fake = FakeTodoist()
+	fake.add("Water plants", due=dict(WEEKLY))
+	first = sync(fake)
+	rows = [replace(row, extra={12: "Garden"}) for row in edit(first, status="Complete")]
+	result = sync(fake, rows, first.state)
+	assert [row.extra for row in result.rows] == [{12: "Garden"}, {12: "Garden"}]
