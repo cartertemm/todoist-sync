@@ -2,6 +2,7 @@ import datetime
 from dataclasses import replace
 
 import pytest
+import requests
 
 from fakes import FakeTodoist
 from mapping import Record
@@ -355,3 +356,60 @@ def test_task_gone_after_push_removes_row():
 	assert result.rows == []
 	assert result.state["tasks"] == {}
 	assert any("removed row" in line for line in result.log)
+
+
+def test_failed_push_does_not_mark_completion_handled():
+	fake = FakeTodoist()
+	task_id = fake.add("Water plants", due=dict(WEEKLY))
+	first = sync(fake)
+	fake.tasks[task_id]["due"]["date"] = "2026-10-16"
+	fake.completed.append({"id": task_id})
+	later = NOW + datetime.timedelta(hours=1)
+	fake.fail_on = "update_task"
+	failed = run_sync(edit(first, content="Renamed"), fake, first.state, OWNER, later)
+	assert failed.error is not None
+	assert [row.id for row in failed.rows] == [task_id]
+	assert failed.state["handled_completions"] == []
+	fake.fail_on = None
+	retry = run_sync(failed.rows, fake, failed.state, OWNER, later)
+	assert [row.id for row in retry.rows] == [task_id, f"{task_id}:done"]
+
+
+def test_recurring_close_is_not_repeated_after_failed_refetch():
+	fake = FakeTodoist()
+	task_id = fake.add("Water plants", due=dict(WEEKLY))
+	first = sync(fake)
+	later = NOW + datetime.timedelta(hours=1)
+
+	def refuse(_):
+		raise requests.RequestException("get_task failed")
+
+	fake.get_task = refuse
+	failed = run_sync(edit(first, status="Complete"), fake, first.state, OWNER, later)
+	assert failed.error is not None
+	del fake.get_task
+	retry = run_sync(failed.rows, fake, failed.state, OWNER, later)
+	assert retry.error is None
+	assert [call for call in fake.calls if call[0] == "close_task"] == [("close_task", task_id)]
+	assert fake.tasks[task_id]["due"]["date"] == "2026-10-16"
+
+
+def test_new_complete_row_keeps_complete_status_when_close_fails():
+	fake = FakeTodoist()
+	fake.fail_on = "close_task"
+	failed = sync(fake, [Row(None, record("Done thing", status="Complete"))])
+	task_id = failed.rows[0].id
+	assert failed.rows[0].record.status == "Complete"
+	assert failed.state["tasks"][task_id]["status"] == "Todo"
+	fake.fail_on = None
+	retry = sync(fake, failed.rows, failed.state)
+	assert retry.error is None
+	assert fake.tasks[task_id]["checked"]
+
+
+def test_clean_run_saves_only_its_own_handled_completions():
+	fake = FakeTodoist()
+	fake.add("Task")
+	first = sync(fake)
+	state = {**first.state, "handled_completions": ["old"]}
+	assert sync(fake, first.rows, state).state["handled_completions"] == []

@@ -85,6 +85,7 @@ class SyncRun:
 		error = None
 		for row in rows:
 			written = len(new_rows)
+			mark = len(self.handled)
 			if error is None:
 				try:
 					self._sync_row(row, snapshot, fetched, completions, new_rows, new_state)
@@ -93,6 +94,7 @@ class SyncRun:
 					error = exc
 			if len(new_rows) == written:
 				new_rows.append(row)
+				del self.handled[mark:]
 			if row.id in snapshot:
 				new_state[row.id] = snapshot[row.id]
 		if error is None:
@@ -251,7 +253,9 @@ class SyncRun:
 		new_state[task_id] = final
 		self.log.append(f"created in Todoist: {final.content}")
 		if record.status == "Complete":
+			new_rows[-1] = Row(task_id, replace(final, status="Complete"), row.start_date)
 			self.client.close_task(task_id)
+			new_state[task_id] = replace(final, status="Complete")
 			if (created.get("due") or {}).get("is_recurring"):
 				self.handled.append(task_id)
 			closed = self.client.get_task(task_id)
