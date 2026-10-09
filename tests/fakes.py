@@ -81,6 +81,7 @@ class FakeTodoist:
 		task = self.tasks[task_id]
 		if task["due"] and task["due"]["is_recurring"]:
 			task["due"]["date"] = _next_date(task["due"]["date"])
+			self.completed.append({"id": task_id})
 		else:
 			task["checked"] = True
 

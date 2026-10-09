@@ -66,6 +66,7 @@ class SyncRun:
 		self.owner = owner
 		self.now = now
 		self.log = []
+		self.handled = []
 
 	def run(self, rows, state, max_delete_percent, allow_deletes):
 		projects = self.client.projects()
@@ -77,18 +78,21 @@ class SyncRun:
 		row_ids = {row.id for row in rows if row.id}
 		fetched = self._fetch_missing(snapshot, row_ids)
 		self._check_deletes(snapshot, row_ids, fetched, max_delete_percent, allow_deletes)
-		completions = self._recurring_completions(state.get("last_sync"))
+		old_handled = state.get("handled_completions", [])
+		completions = self._recurring_completions(state.get("last_sync")) - set(old_handled)
 		new_rows = []
 		new_state = {}
 		error = None
 		for row in rows:
+			written = len(new_rows)
 			if error is None:
 				try:
 					self._sync_row(row, snapshot, fetched, completions, new_rows, new_state)
 					continue
 				except requests.RequestException as exc:
 					error = exc
-			new_rows.append(row)
+			if len(new_rows) == written:
+				new_rows.append(row)
 			if row.id in snapshot:
 				new_state[row.id] = snapshot[row.id]
 		if error is None:
@@ -96,7 +100,16 @@ class SyncRun:
 		else:
 			for task_id in snapshot.keys() - row_ids:
 				new_state[task_id] = snapshot[task_id]
-		new_state_data = {"last_sync": self.now.isoformat(), "tasks": {task_id: asdict(item) for task_id, item in new_state.items()}}
+		last_sync = self.now.isoformat()
+		handled = self.handled
+		if error is not None:
+			last_sync = state.get("last_sync", last_sync)
+			handled = list(dict.fromkeys(old_handled + handled))
+		new_state_data = {
+			"last_sync": last_sync,
+			"handled_completions": handled,
+			"tasks": {task_id: asdict(item) for task_id, item in new_state.items()},
+		}
 		return Result(new_rows, new_state_data, list(self.project_names.values()), self.log, error)
 
 	def _fetch_missing(self, snapshot, row_ids):
@@ -150,6 +163,7 @@ class SyncRun:
 		history = []
 		if row.id in completions and base is not None:
 			history.append(self._history_row(row, base))
+			self.handled.append(row.id)
 			if push.get("status") == "Complete":
 				del push["status"]
 				final = replace(final, status=todoist.status)
@@ -162,6 +176,9 @@ class SyncRun:
 			if push.get("status") == "Complete" and todoist.repeat:
 				history.append(self._history_row(row, replace(final, due=todoist.due)))
 			task = self._push(task, push, final)
+			if task is None:
+				self.log.append(f"removed row: {final.content}")
+				return
 			final = task_to_record(task, self.project_names, self.owner)
 			self.log.append(f"updated in Todoist: {final.content}")
 		elif final != row.record:
@@ -203,6 +220,8 @@ class SyncRun:
 		if "status" in push:
 			if final.status == "Complete" and not task.get("checked"):
 				self.client.close_task(task_id)
+				if (task.get("due") or {}).get("is_recurring"):
+					self.handled.append(task_id)
 			elif final.status != "Complete" and task.get("checked"):
 				self.client.reopen_task(task_id)
 		return self.client.get_task(task_id)
@@ -225,15 +244,20 @@ class SyncRun:
 			fields["due_string"] = record.repeat
 		elif record.due:
 			fields["due_date"] = record.due
-		task_id = self.client.create_task(**fields)["id"]
-		final = task_to_record(self.client.get_task(task_id), self.project_names, self.owner)
+		created = self.client.create_task(**fields)
+		task_id = created["id"]
+		final = task_to_record(created, self.project_names, self.owner)
 		new_rows.append(Row(task_id, final, row.start_date))
 		new_state[task_id] = final
 		self.log.append(f"created in Todoist: {final.content}")
 		if record.status == "Complete":
 			self.client.close_task(task_id)
-			new_rows[-1] = Row(task_id, task_to_record(self.client.get_task(task_id), self.project_names, self.owner), row.start_date)
-			new_state[task_id] = new_rows[-1].record
+			if (created.get("due") or {}).get("is_recurring"):
+				self.handled.append(task_id)
+			closed = self.client.get_task(task_id)
+			if closed is not None:
+				new_rows[-1] = Row(task_id, task_to_record(closed, self.project_names, self.owner), row.start_date)
+				new_state[task_id] = new_rows[-1].record
 
 	def _finish(self, snapshot, row_ids, new_rows, new_state):
 		pending = [task_id for task_id in snapshot if task_id not in row_ids]

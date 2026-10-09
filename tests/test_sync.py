@@ -307,3 +307,51 @@ def test_api_error_after_create_keeps_new_id():
 	assert result.error is not None
 	assert result.rows[0].id is not None
 	assert result.rows[0].id in result.state["tasks"]
+
+
+def test_new_complete_row_keeps_id_when_close_fails():
+	fake = FakeTodoist()
+	fake.fail_on = "close_task"
+	result = sync(fake, [Row(None, record("Done thing", status="Complete"))])
+	assert result.error is not None
+	assert len(result.rows) == 1
+	assert result.rows[0].id is not None
+	assert result.rows[0].id in result.state["tasks"]
+
+
+def test_recurring_completion_from_excel_adds_history_row_once():
+	fake = FakeTodoist()
+	fake.add("Water plants", due=dict(WEEKLY))
+	first = sync(fake)
+	second = sync(fake, edit(first, status="Complete"), first.state)
+	third = sync(fake, second.rows, second.state)
+	assert third.rows == second.rows
+
+
+def test_failed_run_keeps_last_sync_so_history_row_is_not_lost():
+	fake = FakeTodoist()
+	fake.add("Other")
+	recurring_id = fake.add("Water plants", due=dict(WEEKLY))
+	first = sync(fake)
+	fake.tasks[recurring_id]["due"]["date"] = "2026-10-16"
+	fake.completed.append({"id": recurring_id})
+	later = NOW + datetime.timedelta(hours=1)
+	fake.fail_on = "update_task"
+	failed = run_sync(edit(first, content="Other 2"), fake, first.state, OWNER, later)
+	assert failed.error is not None
+	assert failed.state["last_sync"] == NOW.isoformat()
+	fake.fail_on = None
+	retry = run_sync(failed.rows, fake, failed.state, OWNER, later)
+	assert retry.error is None
+	assert f"{recurring_id}:done" in [row.id for row in retry.rows]
+
+
+def test_task_gone_after_push_removes_row():
+	fake = FakeTodoist()
+	fake.add("Task")
+	first = sync(fake)
+	fake.get_task = lambda task_id: None
+	result = sync(fake, edit(first, content="Renamed"), first.state)
+	assert result.rows == []
+	assert result.state["tasks"] == {}
+	assert any("removed row" in line for line in result.log)
