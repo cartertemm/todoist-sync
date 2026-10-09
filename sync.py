@@ -2,7 +2,9 @@ import argparse
 import datetime
 import json
 import os
+import textwrap
 import tomllib
+import traceback
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -396,20 +398,37 @@ def write_log(path, now, message):
 		file.write(f"{now.isoformat(timespec='seconds')} {message}\n")
 
 
+def describe_failure(error):
+	trace = "".join(traceback.format_exception(error)).rstrip()
+	return f"error: {type(error).__name__}: {error}\n" + textwrap.indent(trace, TRACE_INDENT)
+
+
 def main(argv=None):
 	parser = argparse.ArgumentParser(description="Sync Todoist tasks with an Excel workbook.")
 	parser.add_argument("--allow-deletes", action="store_true", help="skip the mass delete check for this one run")
 	parser.add_argument("--config", type=Path, default=CONFIG_PATH, help="path to config.toml")
 	args = parser.parse_args(argv)
+	now = datetime.datetime.now(datetime.timezone.utc)
+	try:
+		return sync_once(args, now)
+	except Exception as error:
+		write_log(LOG_PATH, now, describe_failure(error))
+		return 1
+
+
+def sync_once(args, now):
 	config = load_config(args.config)
 	path = config["workbook"]
 	owner = config["owner"]
-	now = datetime.datetime.now(datetime.timezone.utc)
 	if workbook.is_open(path):
 		write_log(LOG_PATH, now, "workbook is open, skipped")
 		return 0
 	if path.exists():
-		rows = workbook.load_rows(path, owner)
+		try:
+			rows = workbook.load_rows(path, owner)
+		except workbook.WorkbookError as error:
+			write_log(LOG_PATH, now, f"workbook problem, nothing changed: {error}")
+			return 1
 		state = load_state(STATE_PATH)
 	else:
 		rows, state = [], {}
@@ -427,12 +446,16 @@ def main(argv=None):
 	except requests.RequestException as error:
 		write_log(LOG_PATH, now, f"Todoist error, nothing changed: {error}")
 		return 1
-	workbook.backup(path, BACKUP_DIR, BACKUPS_KEPT)
-	workbook.save_rows(path, result.rows, result.project_names, owner)
-	save_state(STATE_PATH, result.state)
 	summary = "; ".join(result.log) or "no changes"
 	if result.error:
 		summary += f"; stopped early, Todoist error: {result.error}"
+	workbook.backup(path, BACKUP_DIR, BACKUPS_KEPT)
+	try:
+		workbook.save_rows(path, result.rows, result.project_names, owner)
+	except Exception as error:
+		write_log(LOG_PATH, now, f"{summary}; workbook not saved, so state.json was not saved. {describe_failure(error)}")
+		return 1
+	save_state(STATE_PATH, result.state)
 	write_log(LOG_PATH, now, summary)
 	return 1 if result.error else 0
 
