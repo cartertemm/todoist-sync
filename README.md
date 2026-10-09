@@ -35,7 +35,7 @@ To use a config file somewhere else, run `python sync.py --config PATH`.
 
 ### First run with a sheet you already have
 
-If your sheet already has tasks in it, each row links to the open Todoist task with the same name in the same project. Rows with no match become new Todoist tasks, and Todoist tasks with no match become new rows.
+If your sheet already has tasks in it, each row links to the open Todoist task with the same name in the same project. Rows with no match become new Todoist tasks, and Todoist tasks with no match become new rows. Rows marked Complete with no ID stay in Excel only. The script doesn't send them to Todoist.
 
 ## How the sheet lines up with Todoist
 
@@ -55,7 +55,7 @@ If your sheet already has tasks in it, each row links to the open Todoist task w
 
 There's also a hidden ID column. Leave it alone. It's how the script knows which row goes with which task. To add a task from Excel, fill in a new row and leave the ID blank.
 
-Copying a whole row is fine. The copy becomes a new task.
+Copying a whole row is fine, above or below the original. The copy becomes a new task, and the original keeps its Todoist task. If you change both the copy and the original before the next sync, the upper row keeps the Todoist task.
 
 ## Close the workbook before a sync
 

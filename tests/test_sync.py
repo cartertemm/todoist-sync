@@ -311,16 +311,6 @@ def test_api_error_after_create_keeps_new_id():
 	assert result.rows[0].id in result.state["tasks"]
 
 
-def test_new_complete_row_keeps_id_when_close_fails():
-	fake = FakeTodoist()
-	fake.fail_on = "close_task"
-	result = sync(fake, [Row(None, record("Done thing", status="Complete"))])
-	assert result.error is not None
-	assert len(result.rows) == 1
-	assert result.rows[0].id is not None
-	assert result.rows[0].id in result.state["tasks"]
-
-
 def test_recurring_completion_from_excel_adds_history_row_once():
 	fake = FakeTodoist()
 	fake.add("Water plants", due=dict(WEEKLY))
@@ -393,19 +383,6 @@ def test_recurring_close_is_not_repeated_after_failed_refetch():
 	assert retry.error is None
 	assert [call for call in fake.calls if call[0] == "close_task"] == [("close_task", task_id)]
 	assert fake.tasks[task_id]["due"]["date"] == "2026-10-16"
-
-
-def test_new_complete_row_keeps_complete_status_when_close_fails():
-	fake = FakeTodoist()
-	fake.fail_on = "close_task"
-	failed = sync(fake, [Row(None, record("Done thing", status="Complete"))])
-	task_id = failed.rows[0].id
-	assert failed.rows[0].record.status == "Complete"
-	assert failed.state["tasks"][task_id]["status"] == "Todo"
-	fake.fail_on = None
-	retry = sync(fake, failed.rows, failed.state)
-	assert retry.error is None
-	assert fake.tasks[task_id]["checked"]
 
 
 def test_clean_run_saves_only_its_own_handled_completions():
@@ -559,15 +536,6 @@ def test_closed_task_that_cannot_be_read_stays_complete():
 	assert result.state["tasks"][task_id]["status"] == "Complete"
 
 
-def test_new_complete_row_stays_when_closed_task_cannot_be_read():
-	fake = FakeTodoist()
-	hide_completed(fake)
-	result = sync(fake, [Row(None, record("Done thing", status="Complete"))])
-	task_id = result.rows[0].id
-	assert result.rows[0].record.status == "Complete"
-	assert result.state["tasks"][task_id]["status"] == "Complete"
-
-
 def test_missing_inbox_skips_rows_without_project():
 	fake = FakeTodoist()
 	fake.project_list = [WORK, HOME]
@@ -584,3 +552,28 @@ def test_extra_columns_follow_the_row():
 	rows = [replace(row, extra={12: "Garden"}) for row in edit(first, status="Complete")]
 	result = sync(fake, rows, first.state)
 	assert [row.extra for row in result.rows] == [{12: "Garden"}, {12: "Garden"}]
+
+
+def test_complete_row_without_id_stays_in_excel_only():
+	fake = FakeTodoist()
+	fake.add("Old job")
+	rows = [Row(None, record("Old job", status="Complete")), Row(None, record("Older job", status="Complete"))]
+	result = sync(fake, rows)
+	assert result.rows[:2] == rows
+	assert len(fake.tasks) == 1
+	assert not any(call[0] in ("create_task", "close_task") for call in fake.calls)
+	assert set(result.state["tasks"]) == {"t1"}
+	assert "kept 2 Complete rows without an ID in Excel only" in result.log
+
+
+def test_copy_above_original_becomes_the_new_task():
+	fake = FakeTodoist()
+	task_id = fake.add("Task")
+	first = sync(fake)
+	copy = Row(task_id, record("Task copy"))
+	result = sync(fake, [copy] + first.rows, first.state)
+	assert fake.tasks[task_id]["content"] == "Task"
+	assert not any(call[0] == "update_task" for call in fake.calls)
+	assert result.rows[1] == first.rows[0]
+	assert result.rows[0].id not in (None, task_id)
+	assert fake.tasks[result.rows[0].id]["content"] == "Task copy"

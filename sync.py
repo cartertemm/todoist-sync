@@ -95,6 +95,7 @@ class SyncRun:
 		self.now = now
 		self.log = []
 		self.handled = []
+		self.kept_complete = 0
 
 	def run(self, rows, state, max_delete_percent, allow_deletes):
 		projects = self.client.projects()
@@ -103,7 +104,7 @@ class SyncRun:
 		self.inbox_id = next((project["id"] for project in projects if project.get("inbox_project")), None)
 		self.open_tasks = {task["id"]: task for task in self.client.open_tasks()}
 		snapshot = {task_id: Record(**data) for task_id, data in state.get("tasks", {}).items()}
-		rows = self._split_copies(rows)
+		rows = self._split_copies(rows, snapshot)
 		row_ids = {row.id for row in rows if row.id}
 		self.taken = row_ids | snapshot.keys()
 		self.completed_ids = self._completed_ids(state.get("last_sync"))
@@ -131,6 +132,8 @@ class SyncRun:
 				del self.handled[mark:]
 			if row.id in snapshot:
 				new_state[row.id] = snapshot[row.id]
+		if self.kept_complete:
+			self.log.append(f"kept {self.kept_complete} Complete rows without an ID in Excel only")
 		if error is None:
 			error = self._finish(snapshot, row_ids, new_rows, new_state)
 		else:
@@ -148,15 +151,19 @@ class SyncRun:
 		}
 		return Result(new_rows, new_state_data, list(self.project_names.values()), self.log, error)
 
-	def _split_copies(self, rows):
-		seen = set()
+	def _split_copies(self, rows, snapshot):
+		owners = {}
+		for index, row in enumerate(rows):
+			if not row.id or row.id.endswith(DONE_SUFFIX):
+				continue
+			owner = owners.get(row.id)
+			if owner is None or (rows[owner].record != snapshot.get(row.id) and row.record == snapshot.get(row.id)):
+				owners[row.id] = index
 		result = []
-		for row in rows:
-			if row.id and not row.id.endswith(DONE_SUFFIX):
-				if row.id in seen:
-					self.log.append(f"copied row becomes a new task: {row.record.content}")
-					row = replace(row, id=None)
-				seen.add(row.id)
+		for index, row in enumerate(rows):
+			if owners.get(row.id, index) != index:
+				self.log.append(f"copied row becomes a new task: {row.record.content}")
+				row = replace(row, id=None)
 			result.append(row)
 		return result
 
@@ -194,6 +201,10 @@ class SyncRun:
 
 	def _sync_row(self, row, snapshot, fetched, completions, new_rows, new_state):
 		if row.id and row.id.endswith(DONE_SUFFIX):
+			new_rows.append(row)
+			return
+		if row.id is None and row.record.status == "Complete":
+			self.kept_complete += 1
 			new_rows.append(row)
 			return
 		if row.id is None:
@@ -337,16 +348,6 @@ class SyncRun:
 		new_rows.append(replace(row, id=task_id, record=final))
 		new_state[task_id] = final
 		self.log.append(f"created in Todoist: {final.content}")
-		if record.status == "Complete":
-			new_rows[-1] = replace(new_rows[-1], record=replace(final, status="Complete"))
-			self.client.close_task(task_id)
-			new_state[task_id] = replace(final, status="Complete")
-			if (created.get("due") or {}).get("is_recurring"):
-				self.handled.append(task_id)
-			closed = self.client.get_task(task_id)
-			if closed is not None:
-				new_rows[-1] = replace(new_rows[-1], record=task_to_record(closed, self.project_names, self.owner))
-				new_state[task_id] = new_rows[-1].record
 
 	def _finish(self, snapshot, row_ids, new_rows, new_state):
 		pending = [task_id for task_id in snapshot if task_id not in row_ids]
