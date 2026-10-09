@@ -1,10 +1,11 @@
 import datetime
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
@@ -21,6 +22,10 @@ DATE_FORMAT = "yyyy-mm-dd"
 TASK_URL = "https://app.todoist.com/app/task/{}"
 LINK_TEXT = "Open"
 BACKUP_STAMP = "%Y%m%d-%H%M%S-%f"
+TEMP_SUFFIX = ".tmp"
+FORMULA_PREFIX = "="
+TEXT_TYPE = "s"
+DROPDOWN_HEADERS = ("Project", "Status", "Priority")
 
 
 @dataclass
@@ -28,6 +33,7 @@ class Row:
 	id: str | None
 	record: Record
 	start_date: Any = None
+	extra: dict[int, Any] = field(default_factory=dict)
 
 
 class WorkbookError(Exception):
@@ -51,11 +57,14 @@ def is_open(path):
 def load_rows(path, owner):
 	sheet = load_workbook(path)[TASKS_SHEET]
 	columns = _columns(sheet)
+	known = set(columns.values())
 	rows = []
-	for values in sheet.iter_rows(min_row=FIRST_DATA_ROW, values_only=True):
+	for cells in sheet.iter_rows(min_row=FIRST_DATA_ROW):
+		values = [cell.value for cell in cells]
 		if all(value in (None, "") for value in values):
 			continue
 		cell = {header: values[index] if index < len(values) else None for header, index in columns.items()}
+		_check_link(cells, columns, _text(cell["ID"]))
 		record = Record(
 			content=_text(cell["Task"]),
 			project=_text(cell["Project"]),
@@ -67,7 +76,8 @@ def load_rows(path, owner):
 			repeat=_text(cell["Repeat"]) or None,
 			priority=_priority(cell["Priority"]),
 		)
-		rows.append(Row(_text(cell["ID"]) or None, record, cell["Start date"]))
+		extra = {index: value for index, value in enumerate(values) if index not in known and value is not None}
+		rows.append(Row(_text(cell["ID"]) or None, record, cell["Start date"], extra))
 	return rows
 
 
@@ -82,14 +92,13 @@ def save_rows(path, rows, project_names, owner):
 		sheet.title = TASKS_SHEET
 		sheet.append(HEADERS)
 	columns = _columns(sheet)
-	if sheet.max_row >= FIRST_DATA_ROW:
-		sheet.delete_rows(FIRST_DATA_ROW, sheet.max_row - FIRST_DATA_ROW + 1)
+	_clear_data(sheet)
 	for row_number, row in enumerate(rows, start=FIRST_DATA_ROW):
 		_write_row(sheet, row_number, columns, row, owner)
 	_write_projects(book, project_names)
 	_add_dropdowns(sheet, columns, len(project_names))
 	sheet.column_dimensions[_letter(columns, "ID")].hidden = True
-	book.save(path)
+	_save_atomic(book, path)
 
 
 def backup(path, backup_dir, keep):
@@ -113,6 +122,35 @@ def _columns(sheet):
 	return columns
 
 
+def _check_link(cells, columns, task_id):
+	index = columns["Link"]
+	link = cells[index].hyperlink if index < len(cells) else None
+	if not task_id or link is None:
+		return
+	if link.target != TASK_URL.format(task_id.removesuffix(DONE_SUFFIX)):
+		raise WorkbookError(
+			f"Row {cells[0].row}: the Link does not match the hidden ID. "
+			"The rows were probably sorted or filtered without the hidden ID column. "
+			"Undo that, or restore a copy from the backups folder."
+		)
+
+
+def _clear_data(sheet):
+	for cells in sheet.iter_rows(min_row=FIRST_DATA_ROW):
+		for cell in cells:
+			cell.hyperlink = None
+			cell.value = None
+
+
+def _save_atomic(book, path):
+	temp = path.with_name(path.name + TEMP_SUFFIX)
+	try:
+		book.save(temp)
+		temp.replace(path)
+	finally:
+		temp.unlink(missing_ok=True)
+
+
 def _letter(columns, header):
 	return get_column_letter(columns[header] + 1)
 
@@ -134,13 +172,23 @@ def _write_row(sheet, row_number, columns, row, owner):
 		"ID": row.id,
 	}
 	for header, value in values.items():
-		cell = sheet.cell(row=row_number, column=columns[header] + 1, value=value)
+		cell = _set_cell(sheet, row_number, columns[header], value)
+		if isinstance(value, str) and value.startswith(FORMULA_PREFIX):
+			cell.data_type = TEXT_TYPE
 		if isinstance(value, datetime.date):
 			cell.number_format = DATE_FORMAT
+	for index, value in row.extra.items():
+		_set_cell(sheet, row_number, index, value)
 	if row.id:
 		link = sheet.cell(row=row_number, column=columns["Link"] + 1, value=LINK_TEXT)
 		link.hyperlink = TASK_URL.format(row.id.removesuffix(DONE_SUFFIX))
 		link.style = "Hyperlink"
+
+
+def _set_cell(sheet, row_number, index, value):
+	if isinstance(value, str):
+		value = ILLEGAL_CHARACTERS_RE.sub("", value)
+	return sheet.cell(row=row_number, column=index + 1, value=value)
 
 
 def _write_projects(book, project_names):
@@ -153,17 +201,25 @@ def _write_projects(book, project_names):
 
 
 def _add_dropdowns(sheet, columns, project_count):
-	sheet.data_validations.dataValidation = []
+	owned = {columns[header] + 1 for header in DROPDOWN_HEADERS}
+	sheet.data_validations.dataValidation = [
+		validation for validation in sheet.data_validations.dataValidation
+		if not _is_owned(validation, owned)
+	]
 	lists = {
 		"Project": f"{PROJECTS_SHEET}!$A$1:$A${max(project_count, 1)}",
 		"Status": '"' + ",".join(STATUSES) + '"',
 		"Priority": '"' + ",".join(PRIORITIES) + '"',
 	}
 	for header, formula in lists.items():
-		validation = DataValidation(type="list", formula1=formula, allow_blank=True)
+		validation = DataValidation(type="list", formula1=formula, allow_blank=True, showErrorMessage=True)
 		letter = _letter(columns, header)
 		validation.add(f"{letter}{FIRST_DATA_ROW}:{letter}{VALIDATION_LAST_ROW}")
 		sheet.add_data_validation(validation)
+
+
+def _is_owned(validation, owned):
+	return all(cells.min_col == cells.max_col and cells.min_col in owned for cells in validation.sqref.ranges)
 
 
 def _text(value):
