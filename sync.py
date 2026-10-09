@@ -1,15 +1,29 @@
+import argparse
 import datetime
+import json
+import os
+import tomllib
 from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path
 
 import requests
 
+import workbook
 from mapping import DATE_LENGTH, DONE_SUFFIX, FIELDS, Record, build_description, labels_for, task_to_record, to_api_priority
+from todoist import TodoistClient
 from workbook import Row
 
 DEFAULT_MAX_DELETE_PERCENT = 25
 COMPLETED_LOOKBACK_DAYS = 89
 API_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 PERCENT = 100
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = BASE_DIR / "config.toml"
+STATE_PATH = BASE_DIR / "state.json"
+LOG_PATH = BASE_DIR / "sync.log"
+BACKUP_DIR = BASE_DIR / "backups"
+BACKUPS_KEPT = 10
+TOKEN_ENV = "TODOIST_API_TOKEN"
 
 
 class DeleteGuardError(Exception):
@@ -283,3 +297,76 @@ class SyncRun:
 			new_state[task_id] = record
 			self.log.append(f"added row: {record.content}")
 		return None
+
+
+def load_config(path):
+	with open(path, "rb") as file:
+		config = tomllib.load(file)
+	return {
+		"token": os.environ.get(TOKEN_ENV) or config["todoist_token"],
+		"workbook": Path(config["workbook"]).expanduser(),
+		"owner": config["owner"],
+		"max_delete_percent": config.get("max_delete_percent", DEFAULT_MAX_DELETE_PERCENT),
+	}
+
+
+def load_state(path):
+	if not path.exists():
+		return {}
+	return json.loads(path.read_text(encoding="utf-8"))
+
+
+def save_state(path, state):
+	temp = path.with_suffix(".tmp")
+	temp.write_text(json.dumps(state, indent="\t"), encoding="utf-8")
+	temp.replace(path)
+
+
+def write_log(path, now, message):
+	with open(path, "a", encoding="utf-8") as file:
+		file.write(f"{now.isoformat(timespec='seconds')} {message}\n")
+
+
+def main(argv=None):
+	parser = argparse.ArgumentParser(description="Sync Todoist tasks with an Excel workbook.")
+	parser.add_argument("--allow-deletes", action="store_true", help="skip the mass delete check for this one run")
+	parser.add_argument("--config", type=Path, default=CONFIG_PATH, help="path to config.toml")
+	args = parser.parse_args(argv)
+	config = load_config(args.config)
+	path = config["workbook"]
+	owner = config["owner"]
+	now = datetime.datetime.now(datetime.timezone.utc)
+	if workbook.is_open(path):
+		write_log(LOG_PATH, now, "workbook is open, skipped")
+		return 0
+	if path.exists():
+		rows = workbook.load_rows(path, owner)
+		state = load_state(STATE_PATH)
+	else:
+		rows, state = [], {}
+	client = TodoistClient(config["token"])
+	try:
+		result = run_sync(rows, client, state, owner, now, config["max_delete_percent"], args.allow_deletes)
+	except DeleteGuardError as error:
+		print(str(error))
+		print("Tasks it would delete:")
+		for name in error.names:
+			print(f"  {name}")
+		print("If you meant this, run: python sync.py --allow-deletes")
+		write_log(LOG_PATH, now, f"{error} Nothing changed.")
+		return 1
+	except requests.RequestException as error:
+		write_log(LOG_PATH, now, f"Todoist error, nothing changed: {error}")
+		return 1
+	workbook.backup(path, BACKUP_DIR, BACKUPS_KEPT)
+	workbook.save_rows(path, result.rows, result.project_names, owner)
+	save_state(STATE_PATH, result.state)
+	summary = "; ".join(result.log) or "no changes"
+	if result.error:
+		summary += f"; stopped early, Todoist error: {result.error}"
+	write_log(LOG_PATH, now, summary)
+	return 1 if result.error else 0
+
+
+if __name__ == "__main__":
+	raise SystemExit(main())
