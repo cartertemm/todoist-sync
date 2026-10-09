@@ -31,6 +31,12 @@ python sync.py
 
 If the workbook doesn't exist yet, the script builds it from your Todoist tasks.
 
+To use a config file somewhere else, run `python sync.py --config PATH`.
+
+### First run with a sheet you already have
+
+If your sheet already has tasks in it, each row links to the open Todoist task with the same name in the same project. Rows with no match become new Todoist tasks, and Todoist tasks with no match become new rows.
+
 ## How the sheet lines up with Todoist
 
 | Column | In Todoist |
@@ -48,6 +54,8 @@ If the workbook doesn't exist yet, the script builds it from your Todoist tasks.
 | Link | Opens the task in Todoist |
 
 There's also a hidden ID column. Leave it alone. It's how the script knows which row goes with which task. To add a task from Excel, fill in a new row and leave the ID blank.
+
+Copying a whole row is fine. The copy becomes a new task.
 
 ## Close the workbook before a sync
 
@@ -82,7 +90,7 @@ Deleting a row that's already Complete doesn't touch Todoist. It just tidies up 
 Windows (run in a normal command prompt, and fix the paths):
 
 ```
-schtasks /Create /SC MINUTE /MO 5 /TN "Todoist sync" /TR "\"C:\path\to\todoist-sync\.venv\Scripts\pythonw.exe\" \"C:\path\to\todoist-sync\sync.py\""
+schtasks /Create /F /SC MINUTE /MO 5 /TN "Todoist sync" /TR "\"C:\path\to\todoist-sync\.venv\Scripts\pythonw.exe\" \"C:\path\to\todoist-sync\sync.py\""
 ```
 
 `pythonw.exe` keeps a console window from popping up every 5 minutes.
