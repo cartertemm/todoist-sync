@@ -1,113 +1,118 @@
 # todoist-sync
 
-Keeps my Todoist tasks and an Excel workbook in sync. Change a task in either place and the next run copies it over to the other side.
+This script keeps my Todoist tasks and an Excel workbook in sync with one another. The format is opinionated, and everyone has their own way of getting things done. This happens to work moderately well for me because I can start, complete, or add notes to tasks from whatever device happens to be closest at hand.
 
-## What you need
+I am publishing it here because someone else might find it useful, not because I want to convert anyone to my way of thinking or tell others what they should do.
 
-* [uv](https://docs.astral.sh/uv/). It installs Python 3.11 or newer for you if you don't have it.
-* A Todoist API token. In Todoist, open Settings, then Integrations, then Developer, and copy the token.
+The mind works in mysterious ways. What works for me might not work for you, despite what productivity gurus selling courses might want you to believe.
+
+But maybe you will try this simple system and find that things in your life become a bit more organized.
+
+## What it does
+
+In short, I can add a task in either Todoist or Excel, edit it, or mark it complete. The next sync copies the change to the other side.
+
+Most fields sync both ways. Completing a repeating task moves its row to the next due date (if it's a recurring task) and leaves a completed row behind as a record.
+
+If I accidentally change the same field in both places, the record stored in Todoist wins. Deleting works both ways too, although the script stops unusually large batches of deletions for me to review because I am paranoid.
+
+## Before you start
+
+You will need:
+
+* [uv](https://docs.astral.sh/uv/) to manage Python and the project dependencies
+* A Todoist API token
+* A program that can open `.xlsx` files
+
+You can find your Todoist token under **Settings**, **Integrations**, **Developer**.
 
 ## Setup
 
-```
+Download or clone this project, then open a terminal in its folder and run:
+
+```console
 uv sync
 ```
 
-Copy `config.example.toml` to `config.toml` and fill it in:
+Make a copy of `config.example.toml` named `config.toml` (`cp config.example.toml config.toml`, and fill in these values:
 
-* `todoist_token`: your token. If you'd rather not keep it in a file, set the `TODOIST_API_TOKEN` environment variable instead. When both are set, the variable wins. Task Scheduler and cron don't see variables you set in your shell. For scheduled runs, keep the token in `config.toml` or set the variable system-wide.
-* `workbook`: where the spreadsheet lives, for example `~/OneDrive/Tasks.xlsx`.
-* `owner`: your name. A task with you (or nobody) in the Who column gets no `who-` label.
-* `max_delete_percent`: see the section on `--allow-deletes` below.
-
-Then run:
-
+```toml
+todoist_token = "your token"
+workbook = "~/OneDrive/Tasks.xlsx"
+owner = "Your name"
+max_delete_percent = 25
 ```
+
+`workbook` is where the spreadsheet file should go. You will want to adjust the path based on the platform you're running, i.e. "c:\\users\\you\\dropbox\\tasks.xlsx" on windows. `owner` is the name that represents you in the **Who** column.
+
+If you don't want your API token stored on disk, you can also keep the token out of this file by setting the `TODOIST_API_TOKEN` environment variable.
+
+Now run the first sync:
+
+```console
 uv run sync.py
 ```
 
-If the workbook doesn't exist yet, the script builds it from your Todoist tasks.
+If the workbook does not exist, the script creates it from your open Todoist tasks. Otherwise, new rows become Todoist tasks and open Todoist tasks become rows.
 
-To use a config file somewhere else, run `uv run sync.py --config PATH`.
+## The workbook
 
-### First run with a sheet you already have
+Here is how each column relates to Todoist:
 
-If your sheet already has tasks in it, each row links to the open Todoist task with the same name in the same project. Rows with no match become new Todoist tasks, and Todoist tasks with no match become new rows. Rows marked Complete with no ID stay in Excel only. The script doesn't send them to Todoist.
-
-## How the sheet lines up with Todoist
-
-| Column | In Todoist |
+| Workbook column | Todoist equivalent |
 | --- | --- |
-| Task | The task name |
-| Project | The project with that name. Pick it from the dropdown. |
-| Start date | Nothing. It only lives in Excel. |
-| Due date | The due date |
-| Status | Todo, Complete, or Blocked. Blocked adds the `@blocked` label. |
-| Who | A `@who-<name>` label, like `@who-Jane` |
-| Follow-up on | A `Follow-up on: 2026-10-12` line in the description |
+| Task | Task name |
+| Project | Project name |
+| Start date | Nothing. This stays in Excel. |
+| Due date | Due date |
+| Status | Todo, Complete, or Blocked. Blocked adds `@blocked`. |
+| Who | A label such as `@who-Jane` |
+| Follow-up on | A dated line in the task description |
 | Notes | The rest of the description |
-| Repeat | The repeat text, like `every monday` |
-| Priority | P1 to P4 |
-| Link | Opens the task in Todoist |
+| Repeat | Todoist repeat text, such as `every monday` |
+| Priority | P1 through P4 |
+| Link | A link to the task in Todoist |
 
-There's also a hidden ID column. Leave it alone. It's how the script knows which row goes with which task. To add a task from Excel, fill in a new row and leave the ID blank.
+The hidden **ID** column matches rows with Todoist tasks and is for internal purposes only. This should be left alone. A new row with a blank ID becomes a new task.
 
-Copying a whole row is fine, above or below the original. The copy becomes a new task, and the original keeps its Todoist task. If you change both the copy and the original before the next sync, the upper row keeps the Todoist task.
+## Running it automatically
 
-## Close the workbook before a sync
+I run the script every five minutes on my homeserver.
 
-The script can't write to the workbook while Excel or LibreOffice has it open. When it sees the file is open, it skips that run and notes it in `sync.log`. The next run tries again.
+You will want to do at least one successful manual sync before scheduling it, just to ensure everything works as it should.
 
-## When both sides change
+On Windows, open Command Prompt and adjust both paths:
 
-If you change the same thing on both sides between syncs (say, the task name), Todoist wins. Changes to different things on the same task both stick.
-
-## Repeating tasks
-
-When you finish a repeating task, on either side, its row stays as Todo and moves to the next date. A new row shows up with Status Complete and the old date, so you keep a record. Those record rows never sync back to Todoist.
-
-## The --allow-deletes flag
-
-Deleting a row in Excel deletes the task in Todoist, and deleting a task in Todoist removes its row. That's what you want most of the time. The danger is a sync that reads a broken file. If the script ever reads an empty sheet, an old copy, or the wrong file, every task looks deleted, and Todoist has no undo for deletes made this way.
-
-So there's a guard. If one sync would delete more than `max_delete_percent` of your tasks (25% unless you change it), it stops before it touches anything and prints the tasks it was about to delete. A scheduled run has no screen, so it only logs the count in `sync.log`. Run `uv run sync.py` by hand to see the list.
-
-Read that list. If you really did mean to delete them, for example because you cleared out an old project, run this once by hand:
-
-```
-uv run sync.py --allow-deletes
-```
-
-That turns the guard off for that one run only. Don't add the flag to your scheduled task, or the guard will never catch anything.
-
-Deleting a row that's already Complete doesn't touch Todoist. It just tidies up the sheet.
-
-## Run it every 5 minutes
-
-These call the Python in `.venv` directly, so run `uv sync` once first.
-
-Windows (run in a normal command prompt, and fix the paths):
-
-```
+```console
 schtasks /Create /F /SC MINUTE /MO 5 /TN "Todoist sync" /TR "\"C:\path\to\todoist-sync\.venv\Scripts\pythonw.exe\" \"C:\path\to\todoist-sync\sync.py\""
 ```
 
-`pythonw.exe` keeps a console window from popping up every 5 minutes.
+On Linux, add this with `crontab -e` and adjust both paths:
 
-Linux, with `crontab -e`:
-
-```
+```cron
 */5 * * * * /home/you/todoist-sync/.venv/bin/python /home/you/todoist-sync/sync.py
 ```
 
-## Files it makes
+## Safety and troubleshooting
 
-* `state.json`: what both sides looked like after the last sync. If you delete it, the next run treats Todoist as correct for every task.
-* `sync.log`: one line per run. The script prints the same line when you run it by hand.
-* `backups/`: the last 10 copies of the workbook, taken before each write.
+Close the workbook before a sync. If it is open, the script skips that run and tries again next time.
+
+`sync.log` records each run, `state.json` remembers the last successful sync, and `backups/` keeps the ten most recent workbook copies.
+
+The deletion guard stops a sync if it would delete more than `max_delete_percent` of the known tasks. This protects me if the script reads an empty, old, or incorrect workbook.
+
+When the guard stops a manual run, it prints the tasks it would have deleted. If the list is correct, I allow that one sync with:
+
+```console
+uv run sync.py --allow-deletes
+```
+
+Only put `--allow-deletes` in a scheduled command if you don't care about the safeguard. In reality, if something goes wrong, you would just have to restore from your `backups` folder, so it's not the end of the world.
 
 ## Tests
 
-```
+To run the test suite:
+
+```console
 uv run pytest
 ```
