@@ -441,7 +441,7 @@ def sync_once(args, now):
 		print("Tasks it would delete:")
 		for name in error.names:
 			print(f"  {name}")
-		print("If you meant this, run: python sync.py --allow-deletes")
+		print("If you meant this, run: uv run sync.py --allow-deletes")
 		write_log(LOG_PATH, now, f"{error} Nothing changed.")
 		return 1
 	except requests.RequestException as error:

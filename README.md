@@ -4,17 +4,16 @@ Keeps my Todoist tasks and an Excel workbook in sync. Change a task in either pl
 
 ## What you need
 
-* Python 3.11 or newer
+* [uv](https://docs.astral.sh/uv/). It installs Python 3.11 or newer for you if you don't have it.
 * A Todoist API token. In Todoist, open Settings, then Integrations, then Developer, and copy the token.
 
 ## Setup
 
 ```
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-source .venv/bin/activate       # Linux
-pip install -r requirements.txt
+uv sync
 ```
+
+That makes a `.venv` folder in the project with everything installed.
 
 Copy `config.example.toml` to `config.toml` and fill it in:
 
@@ -26,12 +25,12 @@ Copy `config.example.toml` to `config.toml` and fill it in:
 Then run:
 
 ```
-python sync.py
+uv run sync.py
 ```
 
 If the workbook doesn't exist yet, the script builds it from your Todoist tasks.
 
-To use a config file somewhere else, run `python sync.py --config PATH`.
+To use a config file somewhere else, run `uv run sync.py --config PATH`.
 
 ### First run with a sheet you already have
 
@@ -73,12 +72,12 @@ When you finish a repeating task, on either side, its row stays as Todo and move
 
 Deleting a row in Excel deletes the task in Todoist, and deleting a task in Todoist removes its row. That's what you want most of the time. The danger is a sync that reads a broken file. If the script ever reads an empty sheet, an old copy, or the wrong file, every task looks deleted, and Todoist has no undo for deletes made this way.
 
-So there's a guard. If one sync would delete more than `max_delete_percent` of your tasks (25% unless you change it), it stops before it touches anything and prints the tasks it was about to delete. A scheduled run has no screen, so it only logs the count in `sync.log`. Run `python sync.py` by hand to see the list.
+So there's a guard. If one sync would delete more than `max_delete_percent` of your tasks (25% unless you change it), it stops before it touches anything and prints the tasks it was about to delete. A scheduled run has no screen, so it only logs the count in `sync.log`. Run `uv run sync.py` by hand to see the list.
 
 Read that list. If you really did mean to delete them, for example because you cleared out an old project, run this once by hand:
 
 ```
-python sync.py --allow-deletes
+uv run sync.py --allow-deletes
 ```
 
 That turns the guard off for that one run only. Don't add the flag to your scheduled task, or the guard will never catch anything.
@@ -86,6 +85,8 @@ That turns the guard off for that one run only. Don't add the flag to your sched
 Deleting a row that's already Complete doesn't touch Todoist. It just tidies up the sheet.
 
 ## Run it every 5 minutes
+
+These call the Python in `.venv` directly, so run `uv sync` once first.
 
 Windows (run in a normal command prompt, and fix the paths):
 
@@ -110,5 +111,5 @@ Linux, with `crontab -e`:
 ## Tests
 
 ```
-python -m pytest
+uv run pytest
 ```
