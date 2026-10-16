@@ -257,3 +257,20 @@ def test_backup_keeps_newest_copies(path, tmp_path):
 def test_backup_without_workbook_does_nothing(path, tmp_path):
 	backup(path, tmp_path / "backups", keep=10)
 	assert not (tmp_path / "backups").exists()
+
+
+def test_dates_are_human_readable_and_columns_fit(path):
+	save_rows(path, sample_rows(), PROJECTS, OWNER)
+	sheet = load_workbook(path)["Tasks"]
+	assert sheet["D2"].number_format == "ddd, mmm d, yyyy"
+	assert sheet["C2"].number_format == "ddd, mmm d, yyyy"
+	assert sheet.column_dimensions["D"].width >= len("Wed, Sep 30, 2026")
+
+
+def test_save_keeps_user_column_width(path):
+	save_rows(path, sample_rows(), PROJECTS, OWNER)
+	book = load_workbook(path)
+	book["Tasks"].column_dimensions["D"].width = 40
+	book.save(path)
+	save_rows(path, sample_rows(), PROJECTS, OWNER)
+	assert load_workbook(path)["Tasks"].column_dimensions["D"].width == 40

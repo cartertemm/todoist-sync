@@ -18,7 +18,9 @@ PRIORITIES = ("P1", "P2", "P3", "P4")
 LOWEST_PRIORITY = 4
 FIRST_DATA_ROW = 2
 VALIDATION_LAST_ROW = 5000
-DATE_FORMAT = "yyyy-mm-dd"
+DATE_FORMAT = "ddd, mmm d, yyyy"
+DATE_HEADERS = ("Start date", "Due date", "Follow-up on")
+DATE_COLUMN_WIDTH = 18
 TASK_URL = "https://app.todoist.com/app/task/{}"
 LINK_TEXT = "Open"
 BACKUP_STAMP = "%Y%m%d-%H%M%S-%f"
@@ -99,6 +101,7 @@ def save_rows(path, rows, project_names, owner):
 	_write_projects(book, project_names)
 	_add_dropdowns(sheet, columns, len(project_names))
 	sheet.column_dimensions[_letter(columns, "ID")].hidden = True
+	_widen_date_columns(sheet, columns)
 	_save_atomic(book, path)
 
 
@@ -160,6 +163,13 @@ def _save_atomic(book, path):
 
 def _letter(columns, header):
 	return get_column_letter(columns[header] + 1)
+
+
+def _widen_date_columns(sheet, columns):
+	for header in DATE_HEADERS:
+		letter = _letter(columns, header)
+		if letter not in sheet.column_dimensions:
+			sheet.column_dimensions[letter].width = DATE_COLUMN_WIDTH
 
 
 def _write_row(sheet, row_number, columns, row, owner):
