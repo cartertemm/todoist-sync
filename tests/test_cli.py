@@ -90,6 +90,34 @@ def test_each_run_writes_one_log_line(setup):
 	assert lines[1].endswith("no changes")
 
 
+def test_each_run_prints_what_it_did(setup, capsys):
+	fake, _, config_path, _ = setup
+	fake.add("Write report")
+	sync.main(["--config", str(config_path)])
+	assert "added row: Write report" in capsys.readouterr().out
+	sync.main(["--config", str(config_path)])
+	assert "no changes" in capsys.readouterr().out
+
+
+def test_skipped_run_prints_why(setup, capsys):
+	_, workbook_path, config_path, tmp_path = setup
+	workbook_path.write_bytes(b"")
+	(tmp_path / "~$Tasks.xlsx").write_text("")
+	sync.main(["--config", str(config_path)])
+	assert "workbook is open" in capsys.readouterr().out
+
+
+def test_unexpected_error_is_printed(setup, monkeypatch, capsys):
+	_, _, config_path, _ = setup
+
+	def explode(*args, **kwargs):
+		raise ValueError("boom")
+
+	monkeypatch.setattr(sync, "run_sync", explode)
+	sync.main(["--config", str(config_path)])
+	assert "ValueError: boom" in capsys.readouterr().out
+
+
 def fail_save(*args):
 	raise PermissionError("the workbook is open")
 

@@ -13,8 +13,6 @@ Keeps my Todoist tasks and an Excel workbook in sync. Change a task in either pl
 uv sync
 ```
 
-That makes a `.venv` folder in the project with everything installed.
-
 Copy `config.example.toml` to `config.toml` and fill it in:
 
 * `todoist_token`: your token. If you'd rather not keep it in a file, set the `TODOIST_API_TOKEN` environment variable instead. When both are set, the variable wins. Task Scheduler and cron don't see variables you set in your shell. For scheduled runs, keep the token in `config.toml` or set the variable system-wide.
@@ -105,7 +103,7 @@ Linux, with `crontab -e`:
 ## Files it makes
 
 * `state.json`: what both sides looked like after the last sync. If you delete it, the next run treats Todoist as correct for every task.
-* `sync.log`: one line per run.
+* `sync.log`: one line per run. The script prints the same line when you run it by hand.
 * `backups/`: the last 10 copies of the workbook, taken before each write.
 
 ## Tests

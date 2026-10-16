@@ -2,6 +2,7 @@ import argparse
 import datetime
 import json
 import os
+import sys
 import textwrap
 import tomllib
 import traceback
@@ -397,6 +398,7 @@ def save_state(path, state):
 def write_log(path, now, message):
 	with open(path, "a", encoding="utf-8") as file:
 		file.write(f"{now.isoformat(timespec='seconds')} {message}\n")
+	print(message)
 
 
 def describe_failure(error):
@@ -409,6 +411,8 @@ def main(argv=None):
 	parser.add_argument("--allow-deletes", action="store_true", help="skip the mass delete check for this one run")
 	parser.add_argument("--config", type=Path, default=CONFIG_PATH, help="path to config.toml")
 	args = parser.parse_args(argv)
+	if sys.stdout:
+		sys.stdout.reconfigure(errors="replace")
 	now = datetime.datetime.now(datetime.timezone.utc)
 	try:
 		return sync_once(args, now)
@@ -437,12 +441,11 @@ def sync_once(args, now):
 	try:
 		result = run_sync(rows, client, state, owner, now, config["max_delete_percent"], args.allow_deletes)
 	except DeleteGuardError as error:
-		print(str(error))
+		write_log(LOG_PATH, now, f"{error} Nothing changed.")
 		print("Tasks it would delete:")
 		for name in error.names:
 			print(f"  {name}")
 		print("If you meant this, run: uv run sync.py --allow-deletes")
-		write_log(LOG_PATH, now, f"{error} Nothing changed.")
 		return 1
 	except requests.RequestException as error:
 		write_log(LOG_PATH, now, f"Todoist error, nothing changed: {error}")
